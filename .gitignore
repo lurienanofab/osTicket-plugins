@@ -17,3 +17,5 @@ lib/
 composer.phar
 composer.lock
 composer.json
+
+vendor/
