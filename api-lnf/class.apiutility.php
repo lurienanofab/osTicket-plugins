@@ -11,7 +11,8 @@ class ApiUtility {
 		foreach ($data as $key => $value) {
 			if (is_array($value)) {
 				if (is_numeric($key)) {
-					$key = 'item'.$key; //dealing with <0/>..<n/> issues
+					//$key = 'item'.$key; //dealing with <0/>..<n/> issues
+                    $key = 'row';
 				}
 				$subnode = $xml_data->addChild($key);
 				self::arrayToXml($value, $subnode);

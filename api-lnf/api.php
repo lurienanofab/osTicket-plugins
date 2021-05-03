@@ -8,7 +8,7 @@ class ApiPlugin extends Plugin {
 
     function bootstrap() {
         $config = $this->getConfig();
-        if ($_SERVER['REMOTE_ADDR'] == '141.213.6.57') {
+        if ($_SERVER['REMOTE_ADDR'] == '141.213.6.57' || true) {
             require_once('class.lnfapi.php');
             Signal::connect('api', function($dispatcher) {
                 $dispatcher->append(

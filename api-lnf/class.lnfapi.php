@@ -6,6 +6,7 @@ include_once INCLUDE_DIR.'class.ticket.php';
 
 class LnfApiController extends ApiController {
     var $format;
+    var $action;
     var $status_code = 200;
 
     function handleRequest() {
@@ -14,16 +15,15 @@ class LnfApiController extends ApiController {
 
         $this->format = ApiUtility::getval("format", ApiUtility::getval("f", "json"));
 
-        $action = ApiUtility::getval("action", "get-open-tickets");
+        $this->action = ApiUtility::getval("action", "get-open-tickets");
 
-        $content = $this->processAction($action);
+        $content = $this->processAction();
 
         $this->response($this->status_code, $content);
     }
 
     function createApi() {
         $api = new LnfApi();
-        $api->search = ApiUtility::getval("search", "");
         $api->ticket_id = ApiUtility::getnum("ticket_id", 0);
         $api->ticketID = ApiUtility::getnum("ticketID", 0);
         $api->resource_id = ApiUtility::getnum("resource_id", 0);
@@ -38,11 +38,11 @@ class LnfApiController extends ApiController {
         return $api;
     }
 
-    function processAction($action) {
+    function processAction() {
         //the default action (no resourceId supplied) returns all open tickets
         $api = $this->createApi();
         $result = array();
-        switch ($action){
+        switch ($this->action){
             case "add-ticket":
                 //$result = $this->addTicket();
                 //$this->outputTickets($this->selectTickets(), "[action:$this->action] created ticket #{$result['ticket']->extid} in {$result['timeTaken']} seconds");
@@ -64,13 +64,12 @@ class LnfApiController extends ApiController {
                 $result = $this->getErrorContent('not yet implemented');
                 break;
             case "select-tickets-by-email":
-                //$email = $this->getval("email", "");
-                //$this->outputTickets(LNF::selectTicketsByEmail($email));
-                $result = $this->getErrorContent('not yet implemented');
+                $api->search = "by-email";
+                $result = array('message' => $this->getMessage($api, array('email' => $api->email)), 'data' => $api->selectTickets());
                 break;
             case "select-tickets-by-resource":
-                //$this->outputTickets($this->selectTickets());
-                $result = $this->getErrorContent('not yet implemented');
+                $api->search = "by-resource";
+                $result = array('message' => $this->getMessage($api, array('resource_id' => $api->resource_id)), 'data' => $api->selectTickets());
                 break;
             case "post-message":
                 //if ($this->ticketID != 0){
@@ -100,14 +99,28 @@ class LnfApiController extends ApiController {
                 break;
             case "":
             case "get-open-tickets":
+                $api->search = "by-daterange";
                 $api->status = "open";
-                $result = $api->selectTickets();
+                $result = array('message' => $this->getMessage($api), 'data' => $api->selectTickets());
                 break;
             default:
-                $result = $this->getErrorContent('unsupported action: ' . $action);
+                $result = $this->getErrorContent('unsupported action: ' . $this->action);
         }
 
         return $result;
+    }
+
+    function getMessage($api, $extra = null) {
+        $msg = "action: $this->action";
+        $msg .= ", search: " . ($api->search ? $api->search : "null");
+        $msg .= ", sdate: " . ($api->sdate ? $api->sdate : "null");
+        $msg .= ", edate: " . ($api->edate ? $api->edate : "null");
+        if ($extra) {
+            foreach ($extra as $key => $val) {
+                $msg .= ", $key: " . ($val ? $val : "null");
+            }
+        }
+        return $msg;
     }
 
     function getErrorContent($msg, $code = 500) {
@@ -172,6 +185,7 @@ class LnfApi {
                 "edate"     => $this->edate
             );
         } else {
+            // default is by-daterange
             return array(
                 "ticket_id"         => $this->ticket_id,
                 "ticketID"          => $this->ticketID,
@@ -204,28 +218,53 @@ class LnfApi {
 
 class TicketData extends ApiData {
     function select($criteria) {
-        $sql = "SELECT t.*, ts.state AS 'status', cd.subject, tp.priority_id, tp.priority_desc, cd.resource_id AS 'resource_id', tp.priority_desc, tp.priority_urgency, CONCAT(s.lastname, ', ', s.firstname) AS 'assigned_to'"
+        // the goal here is to return the same columns as the old lnfapi version
+        $sql = "SELECT t.ticket_id, t.number AS 'ticketID', t.dept_id, IFNULL(tp.priority_id, 0) AS 'priority_id', t.topic_id, t.staff_id, ue.address AS 'email', u.name"
+            .", tcd.subject, t.helptopic, ucd.phone, NULL AS 'phone_ext', t.ip_address, ts.state AS 'status', t.source, t.isoverdue, t.isanswered, t.duedate, t.reopened"
+            .", t.closed, th.lastmessage, th.lastresponse, t.created, t.updated, li.value AS 'resource_id', tp.priority_desc, tp.priority_urgency"
+            .", CONCAT(s.lastname, ', ', s.firstname) AS 'assigned_to'"
             ." FROM ".TICKET_TABLE." t"
-            ." INNER JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id"
-            ." INNER JOIN ".TICKET_CDATA_TABLE." cd ON cd.ticket_id = t.ticket_id"
-            ." INNER JOIN ".PRIORITY_TABLE." tp ON tp.priority_id = cd.priority"
-            //." LEFT JOIN ".TICKET_RESOURCE_TABLE." tr ON t.ticket_id = tr.ticket_id"
-            //." INNER JOIN ".TICKET_PRIORITY_TABLE." tp ON tp.priority_id = t.priority_id"
+            ." LEFT JOIN ".THREAD_TABLE." th ON th.object_id = t.ticket_id AND th.object_type = 'T'"
+            ." LEFT JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id"
+            ." LEFT JOIN ".TICKET_CDATA_TABLE." tcd ON tcd.ticket_id = t.ticket_id"
+            ." LEFT JOIN ".LIST_ITEM_TABLE." li ON li.id = tcd.resource_id"
+            ." LEFT JOIN ".PRIORITY_TABLE." tp ON tp.priority_id = tcd.priority"
+            ." LEFT JOIN ".USER_TABLE." u ON u.id = t.user_id"
+            ." LEFT JOIN ".USER_EMAIL_TABLE." ue ON ue.id = t.user_email_id AND u.id = ue.user_id"
+            ." LEFT JOIN ".USER_CDATA_TABLE." ucd ON ucd.user_id = u.id"
             ." LEFT JOIN ".STAFF_TABLE." s ON s.staff_id = t.staff_id";
 
         $sql .= $this->where($criteria);
 
+        //die($sql);
+
         $result = $this->execQuery($sql);
+
+        $this->fixResources($result);
 
         return $result;
     }
 
+    function fixResources(&$tickets) {
+        // Coming in to this funciton $t['resouce_id'] will look something like '#####:Resource Name'.
+        // This function splits the value and sets the array item value to the numeric part.
+        foreach ($tickets as &$t) {
+            $val = $t['resource_id'];
+            if ($val) {
+                $parts = explode(':', $val);
+                if (count($parts) > 1) {
+                    $t['resource_id'] = $parts[0];
+                }
+            }
+        }
+    }
+
     function where($criteria) {
-        $ticket_id = ApiUtility::getnum("ticket_id", 0, $criteria);
-        $ticketID = ApiUtility::getnum("ticketID", 0, $criteria);
-        $resourceId = ApiUtility::getnum("resource_id", 0, $criteria);
+        $ticket_id = $this->escape(ApiUtility::getnum("ticket_id", 0, $criteria));
+        $ticketID = $this->escape(ApiUtility::getnum("ticketID", 0, $criteria));
+        $resourceId = $this->escape(ApiUtility::getnum("resource_id", 0, $criteria));
         $assignedTo = $this->escape(ApiUtility::getval("assigned_to", "", $criteria));
-        $unassigned = ApiUtility::getnum("unassigned", 0, $criteria);
+        $unassigned = $this->escape(ApiUtility::getnum("unassigned", 0, $criteria));
         $email = $this->escape(ApiUtility::getval("email", "", $criteria));
         $name = $this->escape(ApiUtility::getval("name", "", $criteria));
         $status = $this->escape(ApiUtility::getval("status", "", $criteria));
@@ -241,15 +280,15 @@ class TicketData extends ApiData {
             $and = " AND";
         }
         if ($ticketID > 0) {
-            $result .= "$and t.ticketID = $ticketID";
+            $result .= "$and t.number = $ticketID";
             $and = " AND";
         }
         if ($resourceId > 0) {
-            $result .= "$and cd.resource_id = $resourceId";
+            $result .= "$and li.value LIKE '$resourceId:%'";
             $and = " AND";
         }
         if ($this->hasValue($assignedTo)) {
-            $result .= "$and CONCAT(s.lastname, ', ', s.firstname) LIKE $assignedTo";
+            $result .= "$and CONCAT(s.lastname, ', ', s.firstname) LIKE '$assignedTo'";
             $and = " AND";
         }
         if ($unassigned == 1) {
@@ -257,19 +296,19 @@ class TicketData extends ApiData {
             $and = " AND";
         }
         if ($this->hasValue($email)) {
-            $result .= "$and t.email LIKE $email";
+            $result .= "$and ue.address LIKE '$email'";
             $and = " AND";
         }
         if ($this->hasValue($name)) {
-            $result .= "$and t.name LIKE $name";
+            $result .= "$and u.name LIKE '$name'";
             $and = " AND";
         }
         if ($this->hasValue($status)) {
-            $result .= "$and ts.state = $status";
+            $result .= "$and ts.state = '$status'";
             $and = " AND";
         }
         if ($this->hasValue($priorityDesc)) {
-            $result .= "$and tp.priority_desc LIKE $priorityDesc";
+            $result .= "$and tp.priority_desc LIKE '$priorityDesc'";
             $and = " AND";
         }
 
@@ -281,10 +320,10 @@ class TicketData extends ApiData {
     private function whereDateRange($and, $column, $sdate, $edate) {
         $and = trim($and);
         $result = "";
-        $result .= ($this->hasValue($sdate)) ? " $and $column >= $sdate" : "";
+        $result .= ($this->hasValue($sdate)) ? " $and $column >= '$sdate'" : "";
         if ($this->hasValue($edate)){
             $result .= (!empty($result)) ? " AND" : " $and";
-            $result .= " $column < $edate";
+            $result .= " $column < '$edate'";
         }
         return $result;
     }
@@ -299,8 +338,6 @@ abstract class ApiData {
     }
 
     protected function execQuery($sql) {
-        //print_r($sql);
-        //die();
         try {
             $result = db_assoc_array(db_query($sql));
             return $result;
@@ -310,6 +347,6 @@ abstract class ApiData {
     }
 
     protected function escape($val) {
-        return db_input($val);
+        return db_input($val, false);
     }
 }
