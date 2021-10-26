@@ -486,11 +486,18 @@ class LnfApi {
 	            if(!($user = User::fromVars(array('email' => $email)))) {
 	                $detail = "Cannot find or create user: $email";
 	            } else {
+					$body = null;
+					if (($vars["format"] ?? "text") == "html")
+						$body = new HtmlThreadEntryBody($vars["message"]);
+					else
+						$body = new TextThreadEntryBody($vars["message"]);
+
 	                $ticket->postMessage(array(
             	        "userId"    => $user->getId(),
-	    	            "message"	=> new TextThreadEntryBody($vars["message"]),
+	    	            "message"	=> $body,,
     	                "source"    => 'api',
 	                ), 'api');
+
                 	$detail = $this->getTicketDetails($ticket);
             	}
             	$result = array("error"=>false, "message"=>"ok: $ticketID", "detail"=>$detail);
