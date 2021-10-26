@@ -18,6 +18,14 @@ class ApiPlugin extends Plugin {
                     })
                 );
             });
+			Signal::connect('api', function($dispatcher) {
+                $dispatcher->append(
+                    url('^/lnf/data$', function() {
+						require('data.php');
+						exit();
+                    })
+                );
+            });
         }
     }
 }
