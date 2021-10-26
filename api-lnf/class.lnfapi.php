@@ -97,6 +97,7 @@ class LnfApiController extends ApiController {
                             'ticketID'  => ApiUtility::getNumber("ticketID", 0, $_POST),
                             'email'     => ApiUtility::getValue("email", "", $_POST),
                             'message'   => ApiUtility::getValue("message", "", $_POST),
+							'format'	=> ApiUtility::getValue("message_format", "text", $_POST),
                         ));
                     } else {
                         $code = 405;
