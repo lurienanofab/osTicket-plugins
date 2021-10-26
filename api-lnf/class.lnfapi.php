@@ -1,12 +1,12 @@
 <?php
-
 require_once 'class.apiutility.php';
 include_once INCLUDE_DIR.'class.api.php';
 include_once INCLUDE_DIR.'class.ticket.php';
-define('TICKET_RESOURCE_TABLE',TABLE_PREFIX.'ticket_resource');
+
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
 
 class LnfApiController extends ApiController {
-
     var $format;
     var $action;
     var $status_code = 200;
@@ -15,14 +15,19 @@ class LnfApiController extends ApiController {
         if(!($key=$this->requireApiKey()) || !$key->canCreateTickets())
             return $this->exerr(401, __('API key not authorized'));
 
-        $this->format = ApiUtility::getval("format", ApiUtility::getval("f", "json"));
+        $this->format = ApiUtility::getValue("format", ApiUtility::getValue("f", "json"));
 
-        $this->action = ApiUtility::getval("action", "get-open-tickets");
+        $this->action = ApiUtility::getValue("action", "get-open-tickets");
 
         $content = $this->processAction();
 
-        $this->response($this->status_code, $content);
+        $this->_response($this->status_code, $content);
     }
+
+	function _response($code, $resp) {
+		Http::response($code, json_encode($resp), "application/json", "UTF-8");
+		exit();
+	}
 
     function isPost() {
         return $_SERVER['REQUEST_METHOD'] == 'POST';
@@ -32,7 +37,6 @@ class LnfApiController extends ApiController {
         //the default action (no resource_id supplied) returns all open tickets
 
         $api = $this->createApi();
-        $sdate = $api->sdate ? $api->sdate : $api->defaultStartDate();
 
         $code = null;
         $result = array();
@@ -41,17 +45,24 @@ class LnfApiController extends ApiController {
             switch ($this->action) {
                 case "add-ticket":
                     if ($this->isPost()) {
-                        $api->addTicket(array(
-                            "email"         => ApiUtility::getval("email", "", $_POST),
-                            "name"          => ApiUtility::getval("name", "", $_POST),
-                            "subject"       => ApiUtility::getval("subject", "", $_POST),
-                            "message"       => ApiUtility::getval("body", "", $_POST),
-                            "pri"           => ApiUtility::getval("pri", "", $_POST),
-                            "resource_id"   => ApiUtility::getval("resource_id", "", $_POST),
-                            "source"        => ApiUtility::getval("source", "", $_POST),
-                        ));
-                        $api->sdate = $sdate;
-                        $result = $this->openTicketsResult($api);
+                        // resource_id should now be like "######:ResourceName", for example "86001:IR Microscope"
+
+                        $vars = array(
+                            "email"         => ApiUtility::getValue("email", "", $_POST),
+                            "name"          => ApiUtility::getValue("name", "", $_POST),
+                            "subject"       => ApiUtility::getValue("subject", "", $_POST),
+                            "message"       => ApiUtility::getValue("message", "", $_POST),
+                            "pri"           => ApiUtility::getValue("pri", "", $_POST),
+                            "resource_id"   => ApiUtility::getValue("resource_id", "", $_POST),
+							"queue"			=> ApiUtility::getValue("queue", "", $_POST),
+                        );
+
+                        $addTicketResult = $api->addTicket($vars);
+
+                        $result = array_merge(
+                            array('add_ticket_result' => array('insert_id' => $addTicketResult['insert_id'], 'errors' => $addTicketResult['errors'])),
+                            $this->openTicketsResult($api),
+                        );
                     } else {
                         $code = 405;
                         throw new Exception("Method not supported: " . $_SERVER['REQUEST_METHOD']);
@@ -67,57 +78,64 @@ class LnfApiController extends ApiController {
                     break;
                 case "select-tickets-by-email":
                     $api->search = "by-email";
-                    $api->sdate = $sdate;
                     $data = $api->getTickets();
-                    $result = array('error' => false, 'message' => $this->getMessage($api, array('email' => $api->email)), 'data' => $data);
+                    $result = array('error' => false, 'message' => $this->getMessage($api, array('email' => $api->email)), 'tickets' => $data);
                     break;
                 case "select-tickets-by-resource":
                     $api->search = "by-resource";
-                    $api->sdate = $sdate;
                     $data = $api->getTickets();
-                    $result = array('error' => false, 'message' => $this->getMessage($api, array('resource_id' => $api->resource_id)), 'data' => $data);
+                    $result = array('error' => false, 'message' => $this->getMessage($api, array('resource_id' => $api->resource_id)), 'tickets' => $data);
+                    break;
+                case "select-tickets-by-date":
+                    $api->search = "by-daterange";
+                    $data = $api->getTickets();
+                    $result = array('error' => false, 'message' => $this->getMessage($api, array('resource_id' => $api->resource_id)), 'tickets' => $data);
                     break;
                 case "post-message":
                     if( $this->isPost() ) {
-                        if( ($ticketID = ApiUtility::getnum("ticketID", 0, $_POST)) != 0 ) {
-                            if( !$user = User::lookupByEmail(ApiUtility::getval("email", "", $_POST)) ) {
-                                $detail = "User not found";
-                            } else {
-                                $ticket = Ticket::lookupByNumber($ticketID);
-                                $ticket->postMessage(array(
-                                    "userId"    => $user->getId(),
-                                    "message"   => ApiUtility::getval("message", "", $_POST),
-                                    "source"    => ApiUtility::getval("source", "", $_POST),
-                                ));
-                                $detail = $api->getTicketDetails($ticket);
-                            }
-                            $result = array("error"=>false, "message"=>"ok: $ticketID", "detail"=>$detail);
-                        } else {
-                            $result = array("error"=>true, "message"=>"Invalid parameter: ticketID");
-                        }
+                        $result = $api->postMessage(array(
+                            'ticketID'  => ApiUtility::getNumber("ticketID", 0, $_POST),
+                            'email'     => ApiUtility::getValue("email", "", $_POST),
+                            'message'   => ApiUtility::getValue("message", "", $_POST),
+                        ));
                     } else {
                         $code = 405;
                         throw new Exception("Method not supported: " . $_SERVER['REQUEST_METHOD']);
                     }
                     break;
                 case "summary":
-                    $resource_id = $api->resource_id;
-                    $summary = $api->getSummary();
+                    $resources = ApiUtility::getValue("resources", "");
 
-                    if( $resource_id ) {
-                        $result = array("error" => false, "message" => "ok: $resource_id", "summary" => $summary);
+                    if ($resources) {
+                        $summary = $api->getSummary($resources);
+                        $result = array('error' => false, 'message' => $this->getMessage($api, array('resources' => $resources)), 'summary' => $summary);
                     } else {
-                        $result = array("error" => true, "message" => "Invalid parameter: resource_id");
+                        $result = array('error' => true, 'message' => 'Invalid parameter: resources');
                     }
                     break;
                 case "get-ticket-counts":
                     $staleCount = $api->getStaleTicketCount(0);
                     $overdueCount = $api->getOverdueTicketCount();
-                    echo json_encode(array("staleTicketCount"=>$staleCount, "overdueTicketCount"=>$overdueCount));
+                    echo json_encode(array("staleTicketCount" => $staleCount, "overdueTicketCount" => $overdueCount));
+                    break;
+                case "get-lists":
+                    $lists = $api->getLists(array(
+                        'list_id'           => ApiUtility::getNumber("list_id", 0),
+                        'form_field_name'   => ApiUtility::getValue("form_field_name", ""),
+                    ));
+                    $result = array('error' => false, 'lists' => $lists);
+                    break;
+                case "get-list-items":
+                    $items = $api->getListItems(array(
+                        'list_id'           => ApiUtility::getNumber("list_id", 0),
+                        'form_field_name'   => ApiUtility::getValue("form_field_name", ""),
+                        'list_item_value'   => ApiUtility::getValue("list_item_value", ""),
+                        'list_item_status'  => ApiUtility::getNumber("list_item_status", -1),
+                    ));
+                    $result = array('error' => false, 'items' => $items);
                     break;
                 case "":
                 case "get-open-tickets":
-                    $api->sdate = $sdate;
                     $result = $this->openTicketsResult($api);
                     break;
                 default:
@@ -130,29 +148,40 @@ class LnfApiController extends ApiController {
         return $result;
     }
 
-    function openTicketsResult($api) {
-        $api->search = "by-daterange";
+    function openTicketsResult($api, $extra = null) {
         $api->status = "open";
         $data = $api->getTickets();
-        $result = array('error' => false, 'message' => $this->getMessage($api), 'data' => $data);
-        return $result;
+        $result = array('error' => false, 'message' => $this->getMessage($api), 'tickets' => $data);
+
+        if ($extra)
+            return array_merge($extra, $result);
+        else
+            return $result;
     }
 
     function createApi() {
         $api = new LnfApi();
-        $api->ticket_id = ApiUtility::getnum("ticket_id", 0);
-        $api->ticketID = ApiUtility::getnum("ticketID", 0);
-        $api->resource_id = ApiUtility::getnum("resource_id", 0);
-        $api->assigned_to = ApiUtility::getval("assigned_to", "");
-        $api->unassigned = ApiUtility::getnum("unassigned", 0);
-        $api->email = ApiUtility::getval("email", "");
-        $api->name = ApiUtility::getval("name", "");
-        $api->priority_desc = ApiUtility::getval("priority_desc", "");
-        $api->status = ApiUtility::getval("status", "");
-        $api->sdate = ApiUtility::getval("sdate", "");
-        $api->edate = ApiUtility::getval("edate", "");
-        $api->staff_id = ApiUtility::getnum("staff_id", 0);
+        $api->search = ApiUtility::getValue("search", "");
+        $api->ticket_id = ApiUtility::getNumber("ticket_id", 0);
+        $api->ticketID = ApiUtility::getNumber("ticketID", 0);
+        $api->resource_id = ApiUtility::getNumber("resource_id", 0);
+        $api->assigned_to = ApiUtility::getValue("assigned_to", "");
+        $api->unassigned = ApiUtility::getNumber("unassigned", 0);
+        $api->email = ApiUtility::getValue("email", "");
+        $api->name = ApiUtility::getValue("name", "");
+        $api->priority_desc = ApiUtility::getValue("priority_desc", "");
+        $api->status = ApiUtility::getValue("status", "");
+        $api->sdate = ApiUtility::getDate("sdate", $this->defaultStartDate());
+        $api->edate = ApiUtility::getDate("edate", "");
+        $api->staff_id = ApiUtility::getNumber("staff_id", 0);
         return $api;
+    }
+
+    function defaultStartDate() {
+        //first day of previous month
+        $today = getdate();
+        $fom = $today['year'].'-'.$today['mon'].'-1';
+        return date('Y-m-d', strtotime("$fom -1 month"));
     }
 
     function getMessage($api, $extra = null) {
@@ -177,29 +206,39 @@ class LnfApiController extends ApiController {
         $content = null;
         $contentType = null;
 
-        switch ($this->format) {
-            case 'xml':
-                $contentType = 'text/xml';
-                $content = ApiUtility::createXml($resp)->asXML();
-                break;
-            case 'json':
-                $contentType = 'application/json';
-                $content = json_encode($resp);
-                break;
-            default:
-                throw new Exception('Unsupported format: ' . $this->format);
-        }
+        if ($code != 200){
+            parent::response($code, $resp);
+        }else{
+            switch ($this->format) {
+                case 'xml':
+                    $contentType = 'text/xml';
+                    $content = ApiUtility::createXml($resp)->asXML();
+                    break;
+                case 'json':
+                    $contentType = 'application/json';
+                    $content = json_encode($resp);
+                    break;
+                default:
+                    throw new Exception('Unsupported format: ' . $this->format);
+            }
 
-        Http::response($code, $content, $contentType);
-        exit();
+            Http::response($code, $content, $contentType);
+            exit();
+        }
+    }
+    
+    function dump($var) {
+        die(json_encode($var));
     }
 }
 
 class LnfApi {
-
     var $ticket_data;
     var $thread_data;
     var $staff_data;
+    var $list_data;
+    var $list_item_data;
+
     var $search;
     var $ticket_id;
     var $ticketID;
@@ -218,22 +257,28 @@ class LnfApi {
         $this->ticket_data = new TicketData();
         $this->thread_data = new ThreadData();
         $this->staff_data  = new StaffData();
+        $this->list_data = new ListData();
+        $this->list_item_data = new ListItemData();
     }
 
     function criteria() {
         if ($this->search == "by-resource") {
+			$this->sdate = null;
+			$this->edate = null;
             return array(
                 "resource_id"   => $this->resource_id,
                 "status"        => "open",
-                "sdate"         => $this->sdate,
-                "edate"         => $this->edate
+				"sdate"			=> null,
+				"edate"			=> null,
             );
         } else if ($this->search == "by-email") {
+			$this->sdate = null;
+			$this->edate = null;
             return array(
                 "email"     => $this->email,
                 "status"    => "open",
-                "sdate"     => $this->sdate,
-                "edate"     => $this->edate
+				"sdate"     => null,
+                "edate"     => null,
             );
         } else {
             // default is by-daterange
@@ -256,6 +301,9 @@ class LnfApi {
     function getTicketDetail() {
         if (!is_numeric($this->ticketID) || $this->ticketID == 0)
             throw new Exception("Invalid parameter: ticketID");
+
+		$this->sdate = null;
+        $this->edate = null;
 
         $query = $this->getTickets();
 
@@ -291,7 +339,7 @@ class LnfApi {
             return $result;
         }
 
-        throw new Exception("Cannot find ticket with ticketID: $this->ticketID");
+        return null;
     }
 
     function getMessages($thread) {
@@ -337,25 +385,123 @@ class LnfApi {
     }
 
     function addTicket($vars) {
-        $ticket = $this->ticket_data->insert(array(
-            "mid"       => "",
-            "email"     => $vars['email'],
-            "name"      => $vars['name'],
-            "subject"   => $vars['subject'],
-            "message"   => $vars['message'],
-            "header"    => "",
-            "pri"       => $vars['pri'],
-            "source"    => $vars['source'],
-        ));
+        // there are two scenarios here:
+        //      1) resource_id is just a number: in this case we get the full list item value (######:ResourceName)
+        //      2) resource_id is the full list item value (######:ResourceName) in which case we make sure the list item exists, add or update if needed
 
-        return $ticket;
+        $resource_id = null;
+
+        if (is_numeric($vars['resource_id'])) {
+            $id = $vars['resource_id'];
+            $items = $this->list_item_data->select(array('form_field_name' => 'resource_id', 'list_item_value' => "$id:%"));
+            if (count($items) > 0) {
+                $resource_id = $items[0]['list_item_value'];
+            } else {
+                // if no list item is found then the ticket will not be assigned to a resource (because $resource_id = null)
+                $resource_id = null;
+            }
+        } else {
+            // resource_id should now be like "######:ResourceName", for example "86001:IR Microscope"
+            $resource_id = $vars['resource_id'];
+            // before adding the ticket we need to make sure the list item exists
+            $this->addOrUpdateResource($resource_id);
+        }
+
+		// find the id for this queue email
+		if (!($emailId = Email::getIdByEmail($vars["queue"])))
+			throw new Exception('Unknown queue email: '.$vars["queue"]);
+
+        // this will create a ticket and send alerts
+
+        $errors = array();
+        $ticket = Ticket::create(array(
+            "mid"           => "",
+			"emailId"		=> $emailId,
+            "email"         => $vars['email'],
+            "name"          => $vars['name'],
+            "subject"       => $vars['subject'],
+            "resource_id"   => $resource_id,
+            "message"       => $vars['message'],
+            "header"        => "",
+            "pri"           => $vars['pri'],
+            "source"        => 'api',
+        ), $errors, 'api');
+
+        $insert_id = $ticket->getId();
+
+        $result = array('insert_id' => $insert_id, 'ticket' => $ticket, 'errors' => $errors);
+
+        return $result;
     }
 
-    function defaultStartDate(){
-        //first day of previous month
-        $today = getdate();
-        $fom = $today['year'].'-'.$today['mon'].'-1';
-        return date('Y-m-d', strtotime("$fom -1 month"));
+    function addOrUpdateResource($resource_id) {
+        if ($resource_id) {
+            // split to get id and name parts
+            $parts = explode(':', $resource_id);
+
+            // make sure $resource_id is valid (######:ResourceName)
+            if (count($parts) > 1 && is_numeric($parts[0])) {
+                $id = $parts[0]; // this is the scheduler ResourceID
+
+                // find any items that begin with the ResourceID
+                $items = $this->list_item_data->select(array('form_field_name' => 'resource_id', 'list_item_value' => "$id:%"));
+
+                if (count($items) == 0) {
+                    // nothing found for this id (ResourceID)
+                    // get the list
+                    $lists = $this->list_data->select(array('form_field_name' => 'resource_id'));
+
+                    if (count($lists) == 0)
+                        return false; // there is no resource_id list, nothing else to do here
+
+                    $list_id = $lists[0]['list_id'];
+                    $list_item_id = $this->list_item_data->insert(array('list_id' => $list_id, 'list_item_value' => $resource_id));
+                } else {
+                    // found a resource, now check if the name is correct
+                    $list_item_id = $items[0]['list_item_id'];
+                    if ($items[0]['list_item_value'] !== $resource_id) {
+                        // the resource name has changed, need to update
+                        $this->list_item_data->update(array('list_item_id' => $list_item_id, 'list_item_value' => $resource_id));
+                    }
+                }
+
+                // return either the new or existing list_item_id
+                return $list_item_id;
+            }
+        }
+
+        // invalid $resource_id
+        return false;
+    }
+
+    function postMessage($vars) {
+        // $vars["email"] should be the email of the message poster, not necessarily the ticket creator
+
+        // if the poster is not the creator they will automatically be added as a collaborator, and a new user will be created if necessary
+
+        if (($ticketID = $vars["ticketID"]) != 0) {
+			if ($ticket = Ticket::lookupByNumber($ticketID)) {
+				$email = $vars["email"] ?? $ticket->getEmail();
+
+	            if(!($user = User::fromVars(array('email' => $email)))) {
+	                $detail = "Cannot find or create user: $email";
+	            } else {
+	                $ticket->postMessage(array(
+            	        "userId"    => $user->getId(),
+        	            "message"   => $vars["message"],
+    	                "source"    => 'api',
+	                ), 'api');
+                	$detail = $this->getTicketDetails($ticket);
+            	}
+            	$result = array("error"=>false, "message"=>"ok: $ticketID", "detail"=>$detail);
+			} else {
+				$result = array("error"=>true, "message"=>"Cannot find ticket # $ticketID");
+			}
+        } else {
+            $result = array("error"=>true, "message"=>"Invalid parameter: ticketID");
+        }
+
+        return $result;
     }
 
     function getDeptMembership() {
@@ -404,11 +550,8 @@ class LnfApi {
         return $result;
     }
 
-    function getSummary() {
-        $result = $this->ticket_data->selectResources(array(
-            "resource_id"   => $this->resource_id
-        ));
-
+    function getSummary($resources) {
+        $result = $this->ticket_data->selectSummary(array('resources' => $resources));
         return $result;
     }
 
@@ -423,7 +566,7 @@ class LnfApi {
 
     function getOverdueTicketCount() {
         $result = $this->staff_data->selectOverdueTickets(array(
-        "staff_id" => $this->staff_id
+            "staff_id" => $this->staff_id
         ));
 
         return $result;
@@ -486,14 +629,119 @@ class LnfApi {
 
         return $result;
     }
+
+    function getLists($criteria) {
+        $result = $this->list_data->select($criteria);
+        return $result;
+    }
+
+    function getListItems($criteria) {
+        $result = $this->list_item_data->select($criteria);
+        return $result;
+    }
+}
+
+class ListItemData extends ApiData {
+    function select($criteria) {
+        $sql = "SELECT ff.id AS form_field_id, ff.type AS form_field_type, ff.label AS form_field_label, ff.name AS form_field_name"
+            . ", l.id AS list_id, l.name AS list_name, l.name_plural AS list_name_plural"
+            . ", li.id AS list_item_id, li.status AS list_item_status, li.value AS list_item_value"
+            . " FROM ".FORM_FIELD_TABLE." ff"
+            . " INNER JOIN ".LIST_TABLE." l ON CONCAT('list-', l.id) = ff.type"
+            . " INNER JOIN ".LIST_ITEM_TABLE." li ON li.list_id = l.id"
+            . $this->where($criteria);
+
+        $result = $this->execQuery($sql);
+
+        return $result;
+    }
+
+    function insert($criteria) {
+        $list_id = $this->escape($criteria["list_id"]);
+        $list_item_value = $this->escape($criteria["list_item_value"]);
+
+        if ($list_id > 0 && $list_item_value) {
+            $sql = "INSERT ".LIST_ITEM_TABLE." (list_id, status, value, extra, sort, properties) VALUES ($list_id, 1, '$list_item_value', NULL, 1, '[]')";
+            $this->execQuery($sql);
+            return $this->getInsertId();
+        }
+
+        return false;
+    }
+
+    function where($criteria) {
+        $list_id = $this->escape($criteria["list_id"]);
+        $form_field_name = $this->escape($criteria["form_field_name"]);
+        $list_item_value = $this->escape($criteria["list_item_value"]);
+        $list_item_status = $this->escape($criteria["list_item_status"]);
+
+        $result = "";
+        $and = " WHERE";
+
+        if ($list_id > 0) {
+            $result .= "$and l.id = $list_id";
+            $and = " AND";
+        }
+        if ($form_field_name) {
+            $result .= "$and ff.name = '$form_field_name'";
+            $and = " AND";
+        }
+        if ($list_item_value) {
+            $result .= "$and li.value LIKE '$list_item_value'";
+            $and = " AND";
+        }
+        if ($list_item_status === "0" || $list_item_status === "1") {
+            $result .= "$and li.status = $list_item_status";
+            $and = " AND";
+        }
+
+        return $result;
+    }
+}
+
+class ListData extends ApiData {
+    function select($criteria) {
+        $sql = "SELECT l.id AS list_id, l.name AS list_name, l.name_plural AS list_name_plural"
+            . ", ff.id AS form_field_id, ff.type AS form_field_type, ff.label AS form_field_label, ff.name AS form_field_name"
+            . " FROM ".LIST_TABLE." l"
+            . " LEFT JOIN ".FORM_FIELD_TABLE." ff ON CONCAT('list-', l.id) = ff.type"
+            . $this->where($criteria);
+
+        $result = $this->execQuery($sql);
+
+        return $result;
+    }
+
+    function where($criteria) {
+        $list_id = $this->escape($criteria["list_id"]);
+        $form_field_name = $this->escape($criteria["form_field_name"]);
+
+        $result = "";
+        $and = " WHERE";
+
+        if ($list_id > 0) {
+            $result .= "$and l.id = $list_id";
+            $and = " AND";
+        }
+        if ($form_field_name) {
+            $result .= "$and ff.name = '$form_field_name'";
+            $and = " AND";
+        }
+
+        return $result;
+    }
 }
 
 class TicketData extends ApiData {
     function select($criteria) {
         // the goal here is to return the same columns as the old lnfapi version
-        $sql = "SELECT t.ticket_id, t.number AS 'ticketID', t.dept_id, d.name AS 'dept_name', IFNULL(tp.priority_id, 0) AS 'priority_id', t.topic_id, t.staff_id, ue.address AS 'email', u.name"
-            .", tcd.subject, t.helptopic, ucd.phone, NULL AS 'phone_ext', t.ip_address, ts.state AS 'status', t.source, t.isoverdue, t.isanswered, t.duedate, t.reopened"
-            .", t.closed, th.lastmessage, th.lastresponse, t.created, t.updated, li.value AS 'resource_id', tp.priority_desc, tp.priority_urgency"
+        $sql = "SELECT t.ticket_id, t.number AS 'ticketID'"
+            .", t.dept_id, d.name AS 'dept_name', IFNULL(tp.priority_id, 0) AS 'priority_id'"
+            .", t.topic_id, t.staff_id, ue.address AS 'email', u.name, tcd.subject"
+            .", t.helptopic, NULL AS 'phone', NULL AS 'phone_ext', t.ip_address, ts.state AS 'status'"
+            .", t.source, t.isoverdue, t.isanswered, t.duedate, t.reopened, t.closed"
+            .", th.lastmessage, th.lastresponse, t.created, t.updated"
+            .", SUBSTRING_INDEX(li.value, ':', 1) AS 'resource_id', tp.priority_desc, tp.priority_urgency"
             .", CONCAT(s.lastname, ', ', s.firstname) AS 'assigned_to', s.email AS 'assigned_email'"
             ." FROM ".TICKET_TABLE." t"
             ." LEFT JOIN ".THREAD_TABLE." th ON th.object_id = t.ticket_id AND th.object_type = 'T'"
@@ -503,23 +751,19 @@ class TicketData extends ApiData {
             ." LEFT JOIN ".PRIORITY_TABLE." tp ON tp.priority_id = tcd.priority"
             ." LEFT JOIN ".USER_TABLE." u ON u.id = t.user_id"
             ." LEFT JOIN ".USER_EMAIL_TABLE." ue ON ue.user_id = t.user_id"
-            ." LEFT JOIN ".USER_CDATA_TABLE." ucd ON ucd.user_id = u.id"
+            //." LEFT JOIN ".USER_CDATA_TABLE." ucd ON ucd.user_id = u.id"
             ." LEFT JOIN ".STAFF_TABLE." s ON s.staff_id = t.staff_id"
             ." LEFT JOIN ".DEPT_TABLE." d ON d.id = t.dept_id";
 
         $sql .= $this->where($criteria);
 
-        //die($sql);
-
         $result = $this->execQuery($sql);
-
-        $this->fixResources($result);
 
         return $result;
     }
 
     function selectResources($criteria) {
-        $resourceId = $this->escape(ApiUtility::getnum("resource_id", 0, $criteria));
+        $resource_id = $this->escape($criteria["resource_id"]);
 
         $sql = "SELECT tr.resource_id, tp.priority_urgency, tp.priority_desc, COUNT(*) AS 'ticket_count' FROM ".TICKET_TABLE." t"
              ." INNER JOIN ".TICKET_RESOURCE_TABLE." tr ON tr.ticket_id = t.ticket_id"
@@ -527,44 +771,48 @@ class TicketData extends ApiData {
              ." INNER JOIN ".FORM_ANSWER_TABLE." fa ON fa.entry_id = fe.id AND fa.value_id IS NOT NULL"
              ." LEFT JOIN ".TICKET_PRIORITY_TABLE." tp ON tp.priority_id = fa.value_id"
              ." LEFT JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id"
-             ." WHERE tr.resource_id IN ($resourceId) AND ts.state IN ('open')"
+             ." WHERE tr.resource_id IN ($resource_id) AND ts.state IN ('open')"
              ." GROUP BY tr.resource_id, tp.priority_urgency, tp.priority_desc";
 
         return $this->execQuery($sql);
     }
 
-    function insert($vars) {
-        $errors = array();
-        $ticket = Ticket::create($vars, $errors, "api");
-        return array('ticket' => $ticket, 'errors' => $errors);
+    function selectSummary($criteria) {
+        $resources = $this->escape($criteria["resources"]);
+
+        $sql = "SELECT SUBSTRING_INDEX(li.value, ':', 1) AS 'resource_id'"
+            .", tp.priority_urgency, tp.priority_desc, COUNT(*) AS 'ticket_count'"
+            ." FROM ".TICKET_TABLE." t"
+            ." LEFT JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id"
+            ." LEFT JOIN ".TICKET_CDATA_TABLE." tcd ON tcd.ticket_id = t.ticket_id"
+            ." LEFT JOIN ".LIST_ITEM_TABLE." li ON li.id = tcd.resource_id"
+            ." LEFT JOIN ".PRIORITY_TABLE." tp ON tp.priority_id = tcd.priority"
+            ." WHERE SUBSTRING_INDEX(li.value, ':', 1) IN ($resources) AND ts.state IN ('open')"
+            ." GROUP BY SUBSTRING_INDEX(li.value, ':', 1), tp.priority_urgency, tp.priority_desc";
+
+        return $this->execQuery($sql);
     }
 
-    function fixResources(&$tickets) {
-        // Coming in to this funciton $t['resouce_id'] will look something like '#####:Resource Name'.
-        // This function splits the value and sets the array item value to the numeric part.
-        foreach ($tickets as &$t) {
-            $val = $t['resource_id'];
-            if ($val) {
-                $parts = explode(':', $val);
-                if (count($parts) > 1) {
-                    $t['resource_id'] = $parts[0];
-                }
-            }
-        }
+    function updateCData($criteria) {
+        $ticket_id = $this->escape($criteria["ticket_id"]);
+        $resource_id = $this->escape($criteria["resource_id"]); // in this case resource_id is the id of the ost_list_items record
+        $sql = "UPDATE ".TICKET_CDATA_TABLE." SET resource_id = $resource_id WHERE ticket_id = $ticket_id";
+        $this->execQuery($sql);
+        return $this->getAffectedRows();
     }
 
     function where($criteria) {
-        $ticket_id = $this->escape(ApiUtility::getnum("ticket_id", 0, $criteria));
-        $ticketID = $this->escape(ApiUtility::getnum("ticketID", 0, $criteria));
-        $resourceId = $this->escape(ApiUtility::getnum("resource_id", 0, $criteria));
-        $assignedTo = $this->escape(ApiUtility::getval("assigned_to", "", $criteria));
-        $unassigned = $this->escape(ApiUtility::getnum("unassigned", 0, $criteria));
-        $email = $this->escape(ApiUtility::getval("email", "", $criteria));
-        $name = $this->escape(ApiUtility::getval("name", "", $criteria));
-        $status = $this->escape(ApiUtility::getval("status", "", $criteria));
-        $sdate = $this->escape(ApiUtility::getval("sdate", "", $criteria));
-        $edate = $this->escape(ApiUtility::getval("edate", "", $criteria));
-        $priorityDesc = $this->escape(ApiUtility::getval("priority_desc", "", $criteria));
+        $ticket_id = $this->escape($criteria["ticket_id"]);
+        $ticketID = $this->escape($criteria["ticketID"]);
+        $resource_id = $this->escape($criteria["resource_id"]);
+        $assignedTo = $this->escape($criteria["assigned_to"]);
+        $unassigned = $this->escape($criteria["unassigned"]);
+        $email = $this->escape($criteria["email"]);
+        $name = $this->escape($criteria["name"]);
+        $status = $this->escape($criteria["status"]);
+        $sdate = $this->escape($criteria["sdate"]);
+        $edate = $this->escape($criteria["edate"]);
+        $priorityDesc = $this->escape($criteria["priority_desc"]);
 
         $result = "";
         $and = " WHERE";
@@ -577,8 +825,8 @@ class TicketData extends ApiData {
             $result .= "$and t.number = $ticketID";
             $and = " AND";
         }
-        if ($resourceId > 0) {
-            $result .= "$and li.value LIKE '$resourceId:%'";
+        if ($resource_id > 0) {
+            $result .= "$and SUBSTRING_INDEX(li.value, ':', 1) = '$resource_id'";
             $and = " AND";
         }
         if ($this->hasValue($assignedTo)) {
@@ -640,15 +888,13 @@ class ThreadData extends ApiData {
 
         $sql .= $this->where($criteria);
 
-        //die($sql);
-
         $result = $this->execQuery($sql);
 
         return $result;
     }
 
     function where($criteria) {
-        $ticket_id = $this->escape(ApiUtility::getnum("ticket_id", 0, $criteria));
+        $ticket_id = $this->escape($criteria["ticket_id"]);
         return " WHERE th.object_type = 'T' and th.object_id = $ticket_id";
     }
 }
@@ -682,7 +928,7 @@ class StaffData extends ApiData {
              ." LEFT JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id"
              ." LEFT JOIN ".THREAD_TABLE." th ON th.object_id = t.ticket_id";
 
-        $staff_id = $this->escape(ApiUtility::getnum("staff_id", 0, $criteria));
+        $staff_id = $this->escape($criteria["staff_id"]);
 
         $sql .= " WHERE t.staff_id = $staff_id";
         $sql .= " AND ts.state = 'open' AND DATEDIFF(NOW(), th.lastresponse) > ".$numdays;
@@ -696,7 +942,7 @@ class StaffData extends ApiData {
         $sql = "SELECT COUNT(*) AS 'overdue_ticket_count' FROM ".TICKET_TABLE." t"
              ." LEFT JOIN ".TICKET_STATUS_TABLE." ts ON ts.id = t.status_id";
 
-        $staff_id = $this->escape(ApiUtility::getnum("staff_id", 0, $criteria));
+        $staff_id = $this->escape($criteria["staff_id"]);
 
         $sql .= " WHERE t.staff_id = $staff_id";
         $sql .= " AND ts.state = 'open' AND t.isoverdue = 1";
@@ -707,7 +953,7 @@ class StaffData extends ApiData {
     }
 
     function where($criteria) {
-        $staff_id = $this->escape(ApiUtility::getnum("staff_id", 0, $criteria));
+        $staff_id = $this->escape($criteria["staff_id"]);
         return " WHERE s.staff_id = $staff_id";
     }
 }
@@ -727,6 +973,14 @@ abstract class ApiData {
         } catch (Exception $e) {
             die(print_r($e, true));
         }
+    }
+
+    protected function getInsertId() {
+        return db_insert_id();
+    }
+
+    protected function getAffectedRows() {
+        return db_affected_rows();
     }
 
     protected function escape($val) {
