@@ -488,7 +488,7 @@ class LnfApi {
 	            } else {
 	                $ticket->postMessage(array(
             	        "userId"    => $user->getId(),
-        	            "message"   => $vars["message"],
+	    	            "message"	=> new TextThreadEntryBody($vars["message"]),
     	                "source"    => 'api',
 	                ), 'api');
                 	$detail = $this->getTicketDetails($ticket);
