@@ -16,7 +16,7 @@ class LnfAuth {
         return Auth2::legs(3)
             ->set('id', $this->config->get('oauth-client-id'))
             ->set('secret', $this->config->get('oauth-client-secret'))
-            ->set('redirect', 'http://' . $_SERVER['HTTP_HOST'] . ROOT_PATH . 'api/auth/ext')
+            ->set('redirect', 'https://' . $_SERVER['HTTP_HOST'] . ROOT_PATH . 'api/auth/ext')
             ->set('scope', 'profile email')
 
             ->authorize($this->config->get('oauth-authorize-url'))
@@ -68,8 +68,8 @@ class LnfStaffAuthBackend extends ExternalStaffAuthenticationBackend {
     function triggerAuth() {
         parent::triggerAuth();
         $lnf = $this->lnf->triggerAuth();
-
-        $lnf->GET($this->config->get('oauth-profile-url') . '?access_token=' . $this->lnf->access_token)
+        $profile_url = $this->config->get('oauth-profile-url') . '?access_token=' . $this->lnf->access_token;
+        $lnf->GET($profile_url)
             ->then(function($response) {
                 require_once INCLUDE_DIR . 'class.json.php';
                 if ($json = JsonDataParser::decode($response->text))
