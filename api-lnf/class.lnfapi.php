@@ -494,7 +494,7 @@ class LnfApi {
 
 	                $ticket->postMessage(array(
             	        "userId"    => $user->getId(),
-	    	            "message"	=> $body,,
+	    	            "message"	=> $body,
     	                "source"    => 'api',
 	                ), 'api');
 
